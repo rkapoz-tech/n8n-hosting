@@ -1,5 +1,3 @@
-version: '3.8'
-
 volumes:
   db_storage:
   n8n_storage:
@@ -7,7 +5,7 @@ volumes:
 
 x-shared: &shared
   restart: always
-  image: docker.n8n.io/n8nio/n8n
+  image: n8nio/n8n:${N8N_VERSION}
   environment:
     - DB_TYPE=postgresdb
     - DB_POSTGRESDB_HOST=postgres
@@ -18,7 +16,37 @@ x-shared: &shared
     - EXECUTIONS_MODE=queue
     - QUEUE_BULL_REDIS_HOST=redis
     - QUEUE_HEALTH_CHECK_ACTIVE=true
-    - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+    - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+    - N8N_DEFAULT_LOCALE=${N8N_DEFAULT_LOCALE}
+    - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+    - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true # Disabilita webhook nel main process (per averlo attivo solo nel webhook node)
+    - N8N_PROTOCOL=${N8N_PROTOCOL}
+    - N8N_PORT=${N8N_PORT}
+    - WEBHOOK_URL=${WEBHOOK_URL}
+    - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL} # URL esterno
+    - N8N_HOST=${N8N_HOST} # Change this
+    - N8N_WEBHOOK=${N8N_WEBHOOK} # Change this for production the prefix is webhook-
+    - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL} # Change this
+    # Configuring n8n container in external mode
+    # https://docs.n8n.io/hosting/configuration/task-runners/
+    - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true # Workflow eseguiti in manuale vengono assegnati ad un worker, e non eseguiti nel "main", viene raccomandato
+    - N8N_RUNNERS_ENABLED=true
+    - N8N_RUNNERS_MODE=external
+    - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+    - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+    - N8N_NATIVE_PYTHON_RUNNER=true
+    - N8N_DATA_TABLES_MAX_SIZE_BYTES=${N8N_DATA_TABLES_MAX_SIZE_BYTES}
+    - N8N_DIAGNOSTICS_ENABLED=${N8N_DIAGNOSTICS_ENABLED}
+    - N8N_WORKER_SERVICE_NAME=n8n-worker
+    - N8N_TASK_BROKER_URL=http://n8n:5679
+    - N8N_COMMAND_RESPONSE_URL=http://n8n:5679
+    - N8N_TASK_BROKER_PORT=5679
+    - N8N_AI_ASSISTANT_BASE_URL=${N8N_AI_ASSISTANT_BASE_URL}
+    - N8N_AI_ENABLED=true
+    - N8N_LOG_LEVEL=${N8N_LOG_LEVEL}
+    - N8N_ALLOW_EXECUTE_COMMAND=true
+    - N8N_ENABLE_NODE_DEV=true
+    - NODES_EXCLUDE=[] # For enabling ExecuteCommand and LocalFileTrigger on n8n v2
   links:
     - postgres
     - redis
@@ -31,6 +59,15 @@ x-shared: &shared
       condition: service_healthy
 
 services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # networks:
+    #   - n8nv2-network
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+
   postgres:
     image: postgres:16
     restart: always
@@ -50,7 +87,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:6-alpine
+    image: redis:7-alpine
     restart: always
     volumes:
       - redis_storage:/data
@@ -60,13 +97,44 @@ services:
       timeout: 5s
       retries: 10
 
-  n8n:
+  n8n-main:
     <<: *shared
-    ports:
-      - 5678:5678
+    #ports:
+    #  - ${N8N_PORT}:5678
 
   n8n-worker:
     <<: *shared
     command: worker
     depends_on:
-      - n8n
+      - n8n-main
+
+  task-runner:
+    image: n8nio/runners:${N8N_VERSION}
+    restart: always
+    #container_name: n8n-runners
+    environment:
+    # Configuring runners container in external mode
+    # https://docs.n8n.io/hosting/configuration/task-runners/
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n-distributed-n8n-worker-1:5679 #http://localhost:5679 #http://n8n-main:5679
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+      # Enable Python and JavaScript support
+      - N8N_RUNNERS_ENABLED_TASK_TYPES=javascript,python
+      # Auto shutdown after 15 seconds of inactivity
+      - N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=15
+      - N8N_RUNNERS_EXTERNAL_ALLOW=*
+      - N8N_RUNNERS_LAUNCHER_LOG_LEVEL=debug
+      # etc.
+    volumes:
+      # Shared volume for file access if needed
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      - n8n-worker
+
+  n8n-webhook:
+    <<: *shared
+    command: webhook
+    depends_on:
+      - n8n-main
+    #ports:
+    #  - 5679:5678
